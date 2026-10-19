@@ -1,0 +1,84 @@
+# .github/workflows/pr-size.yml
+#
+# Fails a PR whose production-code changes exceed LIMIT lines.
+# Tests, docs and Markdown don't count, so the agent is never pushed to
+# skimp on tests to stay under the limit.
+#
+# A human reviewer can let an oversized PR through by adding the label
+# "size-override". If shopizer-bot adds that label itself, the check fails.
+# The job name "pr-size" is what you select as a required status check.
+
+name: PR size
+
+on:
+  pull_request:
+    branches: [3.2.7]
+    # labeled/unlabeled re-run the check when the override label changes.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: read          # to look up who applied the override label
+  pull-requests: read
+
+env:
+  LIMIT: 400
+  OVERRIDE_LABEL: size-override
+  BOT_LOGIN: shopizer-bot
+
+jobs:
+  pr-size:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history so both the base and the head commit are available.
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Counts added + deleted lines between where the PR branched off and
+      # its latest commit. Binary files show "-" in numstat and are skipped.
+      - name: Count changed lines
+        id: size
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          CHANGED=$(git diff --numstat "$BASE...$HEAD" -- . \
+            ':(glob,exclude)**/src/test/**' \
+            ':(glob,exclude)docs/**' \
+            ':(glob,exclude)**/*.md' \
+            | awk '$1 != "-" { s += $1 + $2 } END { print s + 0 }')
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "### PR size: $CHANGED changed lines (limit $LIMIT, excluding tests and docs)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Changed lines: $CHANGED (limit $LIMIT)"
+
+      - name: Enforce limit
+        env:
+          CHANGED: ${{ steps.size.outputs.changed }}
+          HAS_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'size-override') }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$CHANGED" -le "$LIMIT" ]; then
+            echo "Within limit."
+            exit 0
+          fi
+
+          if [ "$HAS_OVERRIDE" = "true" ]; then
+            # Find who most recently applied the override label.
+            ACTOR=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/events" --paginate \
+              --jq "[.[] | select(.event == \"labeled\" and .label.name == \"$OVERRIDE_LABEL\")] | last | .actor.login // empty" \
+              | tail -n 1)
+
+            if [ -n "$ACTOR" ] && [ "$ACTOR" != "$BOT_LOGIN" ]; then
+              echo "::warning::$CHANGED lines exceeds $LIMIT, but '$OVERRIDE_LABEL' was applied by $ACTOR. Allowed."
+              exit 0
+            fi
+
+            echo "::error::'$OVERRIDE_LABEL' was applied by '${ACTOR:-unknown}'. Only a human reviewer may override the size limit."
+            exit 1
+          fi
+
+          echo "::error::$CHANGED changed lines exceeds the limit of $LIMIT. Split the PR according to the plan, or a human reviewer may add the '$OVERRIDE_LABEL' label."
+          exit 1
