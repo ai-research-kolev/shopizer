@@ -32,7 +32,7 @@ jobs:
     steps:
       # Full history so both the base and the head commit are available.
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
